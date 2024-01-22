@@ -24,6 +24,7 @@ from functools import partial
 
 import math
 import sys
+import time
 
 import torch
 import deepspeed
@@ -158,8 +159,10 @@ def mup_coord_check(neox_args, timers, lr_scheduler, train_data_iterator):
         neox_args, timers, lr_scheduler, models, train_data_iterator, mup=False
     )
 
-    plot_coord_data(df_up, save_to=f"coord_check_up.{torch.distributed.get_rank()}.jpg")
-    plot_coord_data(df_sp, save_to=f"coord_check_sp.{torch.distributed.get_rank()}.jpg")
+    plot_coord_data(
+        df_up, save_to=f"coord_check_up.{torch.distributed.get_rank()}.jpg")
+    plot_coord_data(
+        df_sp, save_to=f"coord_check_sp.{torch.distributed.get_rank()}.jpg")
 
     print_rank_0("Saved coord check plots... exiting")
     sys.exit(1)
@@ -178,6 +181,11 @@ def pretrain(neox_args):
         neox_args: an instance of NeoXArgs containing the configuration for pretrain
 
     """
+    with open('iteration_times.csv', 'w') as fd:
+        print('iteration_time', file=fd)
+    with open('ckpt_times.csv', 'w') as fd:
+        print('ckpt_time', file=fd)
+
     # setup logging and timers
     init_wandb(neox_args=neox_args)
     timers = Timers(
@@ -331,7 +339,8 @@ def get_batch_pipe(data, neox_args, curr_scheduler=None):
     )
     if curr_scheduler is not None:
         # iteration + 1 to align with how/when DeepSpeed updates the buffers
-        curriculum_seqlen = curr_scheduler.update_difficulty(neox_args.iteration + 1)
+        curriculum_seqlen = curr_scheduler.update_difficulty(
+            neox_args.iteration + 1)
         if curriculum_seqlen < tokens.size()[1]:
             # seqlen-based curriculum learning
             # input_ids, position_ids, labels have size [batch size, seqlen]
@@ -378,7 +387,8 @@ def forward_step(
     if timers is not None:
         timers("batch generator").stop()
 
-    outputs = model((tokens, position_ids, attention_mask), neox_args=neox_args)
+    outputs = model((tokens, position_ids, attention_mask),
+                    neox_args=neox_args)
     if (
         is_train
         and neox_args.curriculum_learning
@@ -487,7 +497,8 @@ def get_optimizer(model, neox_args):
     # Filter out params that don't require a grad (for soft prompt tuning, etc.)
     _param_groups = []
     for param_group in param_groups:
-        trainable_params = [p for p in param_group["params"] if p.requires_grad]
+        trainable_params = [
+            p for p in param_group["params"] if p.requires_grad]
         param_group["params"] = trainable_params
         _param_groups.append(param_group)
     param_groups = _param_groups
@@ -583,7 +594,8 @@ def get_optimizer(model, neox_args):
             **neox_args.optimizer["params"],
         )
     else:
-        raise ValueError(f"Optimizer type {neox_args.optimizer_type} not recognized")
+        raise ValueError(
+            f"Optimizer type {neox_args.optimizer_type} not recognized")
 
     if neox_args.deepspeed:
         # fp16 wrapper is not required for DeepSpeed.
@@ -632,7 +644,8 @@ def setup_model_and_optimizer(neox_args, use_cache=False, iteration=None):
     """Setup model and optimizer."""
     model = get_model(neox_args=neox_args, use_cache=use_cache)
     optimizer, param_groups = get_optimizer(model=model, neox_args=neox_args)
-    lr_scheduler = get_learning_rate_scheduler(optimizer=optimizer, neox_args=neox_args)
+    lr_scheduler = get_learning_rate_scheduler(
+        optimizer=optimizer, neox_args=neox_args)
 
     if neox_args.deepspeed:
         print_rank_0("DeepSpeed is enabled.")
@@ -661,7 +674,8 @@ def setup_model_and_optimizer(neox_args, use_cache=False, iteration=None):
         if neox_args.is_pipe_parallel:
             model.set_has_attention_mask(True)
             if neox_args.curriculum_learning:
-                curr_scheduler = CurriculumScheduler(neox_args.curriculum_learning)
+                curr_scheduler = CurriculumScheduler(
+                    neox_args.curriculum_learning)
                 if iteration is not None and iteration > 0:
                     curr_scheduler.update_difficulty(iteration)
             else:
@@ -680,6 +694,7 @@ def setup_model_and_optimizer(neox_args, use_cache=False, iteration=None):
         raise ValueError("Must be using deepspeed to run neox")
 
     if neox_args.load is not None:
+        start_time = time.time()
         neox_args.iteration = load_checkpoint(
             neox_args=neox_args,
             model=model,
@@ -690,6 +705,9 @@ def setup_model_and_optimizer(neox_args, use_cache=False, iteration=None):
         print_rank_0(
             f"Loading checkpoint and starting from iteration {neox_args.iteration}"
         )
+        end_time = time.time()
+        with open('restore_times.csv', 'w') as fd:
+            print(f'{end_time - start_time}', file=fd)
     else:
         neox_args.iteration = 0
 
@@ -820,6 +838,7 @@ def train(
     # to monitor if we've skipped many iterations in a row and trigger an early exit
     overflow_monitor = OverflowMonitor(optimizer)
     while iteration < neox_args.train_iters:
+        start_time = time.time()
         loss_dict, skipped_iter = train_step(
             neox_args=neox_args,
             timers=timers,
@@ -828,6 +847,7 @@ def train(
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
         )
+
         iteration += 1
         neox_args.iteration = iteration
         if neox_args.precision == "fp16":
@@ -858,8 +878,13 @@ def train(
             noise_scale_logger=noise_scale_logger,
         )
 
+        end_time = time.time()
+        with open('iteration_times.csv', 'a') as fd:
+            print(f'{end_time - start_time}', file=fd)
+
         # Checkpointing
         if neox_args.save and iteration in neox_args.save_iters:
+            start_time = time.time()
             save_checkpoint(
                 neox_args=neox_args,
                 iteration=iteration,
@@ -867,6 +892,9 @@ def train(
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
             )
+            end_time = time.time()
+            with open('ckpt_times.csv', 'a') as fd:
+                print(f'{end_time - start_time}', file=fd)
         # Evaluation
         if (
             neox_args.eval_interval
@@ -923,7 +951,8 @@ def evaluate(
             iteration += 1
             if verbose and iteration % neox_args.log_interval == 0:
                 print_rank_0(
-                    "Evaluating iter {}/{}".format(iteration, neox_args.eval_iters)
+                    "Evaluating iter {}/{}".format(iteration,
+                                                   neox_args.eval_iters)
                 )
 
             # although we're not accumulating gradients here, we count one iter as train_batch_size_per_gpu * g.a.s
