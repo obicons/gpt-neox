@@ -18,10 +18,6 @@
   "vocab_file": "data/gpt2-vocab.json",
   "merge_file": "data/gpt2-merges.txt",
 
-  "save": "checkpoints",
-  "load": "checkpoints",
-  "checkpoint_validation_with_forward_pass": False,
-
   "tensorboard_dir": "tensorboard",
   "log_dir": "logs",
   "use_wandb": True,
